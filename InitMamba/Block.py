@@ -9,7 +9,8 @@ class MambaMixer(modeling_mamba.MambaMixer):
     def __init__(self, config, layer_idx):
         super().__init__(config, layer_idx)
     
-    def forward(self, input_states, inputs_ssm_states=None, cache_params=None, cache_position=None, attention_mask=None):
+    def forward(self, input_states, inputs_ssm_states=None, output_ssm_last_states=None,
+                cache_params=None, cache_position=None, attention_mask=None):
         batch_size, seq_len, _ = input_states.shape
         dtype = input_states.dtype
         # 1. Gated MLP's linear projection
@@ -69,7 +70,7 @@ class MambaMixer(modeling_mamba.MambaMixer):
         deltaB_u = discrete_B * hidden_states[:, :, :, None].float()
         
         # 3.c perform the recurrence y ← SSM(A, B, C)(x)
-        ssm_last_states = None
+        hs = []
         if self.training and cache_params is None:
             # Scan
             # Most important revise !!!!!!!!!!!!!!!
@@ -79,7 +80,6 @@ class MambaMixer(modeling_mamba.MambaMixer):
                 deltaB_u[:, 0, :, :] = deltaB_u[:, 0, :, :] + A0X0 # Add initial state to the first X before scan
             
             hs = modeling_mamba.pscan(discrete_A, deltaB_u) # [batch, seq_len, intermediate_size, ssm_state_size]
-            ssm_last_states = hs[:,-1]
             scan_output = (hs @ C.unsqueeze(-1)).squeeze(3).transpose(1, 2) # [batch, intermediate_size, seq_len]
             scan_output = scan_output + hidden_states * self.D[None, :, None]
             scan_output = scan_output * self.act(gate)
@@ -88,17 +88,22 @@ class MambaMixer(modeling_mamba.MambaMixer):
             scan_outputs = []
             for i in range(seq_len):
                 ssm_state = discrete_A[:, :, i, :] * ssm_state + deltaB_u[:, :, i, :]      # [batch, intermediade_size, ssm_state]
-                if i == seq_len - 1:
-                    ssm_last_states = ssm_state
+                if output_ssm_last_states: hs.append(ssm_state)
                 scan_output = torch.matmul(ssm_state.to(dtype), C[:, i, :].unsqueeze(-1))  # [batch, intermediade_size, 1]
                 scan_outputs.append(scan_output[:, :, 0])
             
+            if output_ssm_last_states: hs = torch.stack(hs, dim=1)
             scan_output = torch.stack(scan_outputs, dim=-1)                                # [batch, seq_len, intermediade_size]
             scan_output = scan_output + (hidden_states * self.D[None, :, None])
             scan_output = (scan_output * self.act(gate))
 
             if cache_params is not None:
                 cache_params.ssm_states[self.layer_idx].copy_(ssm_state)
+
+        ssm_last_states = None
+        if output_ssm_last_states:
+            if attention_mask is None: ssm_last_states = hs[:, -1]
+            else: ssm_last_states = hs[torch.arange(batch_size), torch.sum(attention_mask, dim=-1, dtype=torch.int64) - 1]
 
         # 4. Final linear projection
         contextualized_states = self.out_proj(scan_output.transpose(1, 2))  # [batch, seq_len, hidden_size]
@@ -115,6 +120,7 @@ class MambaBlock(modeling_mamba.MambaBlock):
         self,
         hidden_states,
         inputs_ssm_states = None,
+        output_ssm_last_states = None,
         cache_params = None,
         cache_position = None,
         attention_mask = None,
@@ -127,6 +133,7 @@ class MambaBlock(modeling_mamba.MambaBlock):
         hidden_states, ssm_last_states = self.mixer(
             hidden_states, 
             inputs_ssm_states=inputs_ssm_states, 
+            output_ssm_last_states = output_ssm_last_states,
             cache_params=cache_params, 
             cache_position=cache_position, 
             attention_mask=attention_mask

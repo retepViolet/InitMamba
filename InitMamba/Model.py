@@ -73,6 +73,7 @@ class MambaModel(modeling_mamba.MambaModel):
                     mixer_block.__call__, 
                     hidden_states, 
                     inputs_ssm_states[i] if inputs_ssm_states is not None else None, 
+                    output_ssm_last_states,
                     cache_params, 
                     cache_position, 
                     attention_mask
@@ -81,6 +82,7 @@ class MambaModel(modeling_mamba.MambaModel):
                 hidden_states, ssm_last_states = mixer_block(
                     hidden_states,
                     inputs_ssm_states=inputs_ssm_states[i] if inputs_ssm_states is not None else None,
+                    output_ssm_last_states=output_ssm_last_states,
                     cache_params=cache_params,
                     cache_position=cache_position,
                     attention_mask=attention_mask,
